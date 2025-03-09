@@ -6,16 +6,15 @@ import com.akash.exportSales.processor.FileProcessor;
 import com.akash.exportSales.processor.SalesProcessor;
 import com.akash.exportSales.repository.SalesRepository;
 import lombok.AllArgsConstructor;
-import lombok.NoArgsConstructor;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.core.partition.support.TaskExecutorPartitionHandler;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.data.RepositoryItemWriter;
 import org.springframework.batch.item.data.builder.RepositoryItemWriterBuilder;
 import org.springframework.batch.item.database.JdbcCursorItemReader;
@@ -25,11 +24,9 @@ import org.springframework.batch.item.file.FlatFileItemWriter;
 import org.springframework.batch.item.file.LineMapper;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.batch.item.file.builder.FlatFileItemWriterBuilder;
-import org.springframework.batch.item.file.mapping.BeanWrapperFieldSetMapper;
 import org.springframework.batch.item.file.mapping.DefaultLineMapper;
 import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.task.SimpleAsyncTaskExecutorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.FileSystemResource;
@@ -39,6 +36,7 @@ import org.springframework.jdbc.core.DataClassRowMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
+import java.sql.SQLException;
 import java.time.LocalDate;
 
 @Configuration
@@ -57,7 +55,7 @@ public class ExportSalesJobConfig {
     public Job dbToFileJob(Step fromSalesTableToFile, Step importFile){
         return new JobBuilder("db to file job", repository)
                 .incrementer(new RunIdIncrementer())
-                .start(importFile)
+                .start(masterStep(partitionHandler(importFile)))
 //                .next(importFile)
                 .build();
     }
@@ -76,9 +74,27 @@ public class ExportSalesJobConfig {
     @Bean
     public TaskExecutor taskExecutor(){
         SimpleAsyncTaskExecutor taskExecutor = new SimpleAsyncTaskExecutor();
-        taskExecutor.setConcurrencyLimit(10);
+//        taskExecutor.setConcurrencyLimit(10);
         return taskExecutor;
     }
+
+    @Bean
+    public TaskExecutorPartitionHandler partitionHandler(Step importFile) {
+        TaskExecutorPartitionHandler handler = new TaskExecutorPartitionHandler();
+        handler.setStep(importFile);
+        handler.setGridSize(5); // Number of parallel partitions (adjust based on available resources)
+        handler.setTaskExecutor(new SimpleAsyncTaskExecutor());
+        return handler;
+    }
+
+    @Bean
+    public Step masterStep(TaskExecutorPartitionHandler partitionHandler) {
+        return new StepBuilder("masterStep", repository)
+                .partitioner("importFile", new CsvFilePartitioner())
+                .partitionHandler(partitionHandler)
+                .build();
+    }
+
 
     //JDBCCursorItemReader
     @Bean
@@ -126,6 +142,11 @@ public class ExportSalesJobConfig {
                 .reader(flatFileItemReader)
                 .processor(fileProcessor)
                 .writer(repositoryItemWriter)
+                .faultTolerant()
+//                .skip(FlatFileParseException.class)
+//                .skipLimit(50)
+                .retry(SQLException.class)
+                .retryLimit(3)
                 .build();
     }
 
